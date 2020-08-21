@@ -7,6 +7,9 @@ The UI component for [yopass](https://github.com/jhaals/yopass)
 ## Local Development
 
 ```bash
+# AWS λ deployment
+REACT_APP_BACKEND_URL=https://t13pbn7jse.execute-api.eu-west-1.amazonaws.com/dev/ yarn start
+# or
 REACT_APP_BACKEND_URL='http://localhost:1337' yarn start
 ```
 

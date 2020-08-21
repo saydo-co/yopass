@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { HashRouter as Router, Route } from 'react-router-dom';
-import { Container, Navbar, NavbarBrand } from 'reactstrap';
+import { Container, Navbar, NavbarBrand, NavbarText } from 'reactstrap';
 
 import './App.scss';
 import Create from './Create';
@@ -10,24 +10,25 @@ import Features from './Features';
 import Upload from './Upload';
 import { useTranslation } from 'react-i18next';
 
-class App extends React.Component {
-  public render() {
-    return (
-      <Router>
-        <Navbar color="dark" dark={true} expand="md">
-          <NavbarBrand href="/">
-            Yopass <img width="40" height="40" alt="" src="yopass.svg" />
-          </NavbarBrand>
-        </Navbar>
-        <Container className="margin">
-          <Routes />
-        </Container>
-        <Features />
-        <Attribution />
-      </Router>
-    );
-  }
-}
+const App = () => {
+  return (
+    <Router>
+      <Navbar color="dark" dark={true} expand="md">
+        <NavbarBrand href="/">
+          <img width="200" height="40" alt="" src="saydo.svg" />
+        </NavbarBrand>
+        <NavbarText className="mr-2">
+          Send us a secret. No man in the middle.
+        </NavbarText>
+      </Navbar>
+      <Container className="margin">
+        <Routes />
+      </Container>
+      <Features />
+      <Attribution />
+    </Router>
+  );
+};
 
 const Routes = () => {
   return (
@@ -43,11 +44,12 @@ const Routes = () => {
 };
 
 const Attribution = () => {
-const { t } = useTranslation();
+  const { t } = useTranslation();
   return (
     <Container className="text-center">
       <div className="text-muted small footer">
-        {t("Created by")} <a href="https://github.com/jhaals/yopass">{t("Johan Haals")}</a>
+        {t('With ♥ and thanks to')}{' '}
+        <a href="https://github.com/jhaals/yopass">{t('Johan Haals')}</a>
       </div>
     </Container>
   );
