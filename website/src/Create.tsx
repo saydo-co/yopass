@@ -14,7 +14,7 @@ import { encryptMessage, postSecret, randomString } from './utils';
 import { useTranslation } from 'react-i18next';
 
 const Create = () => {
-  const [expiration, setExpiration] = useState(3600);
+  const [expiration, setExpiration] = useState(604800);
   const [error, setError] = useState('');
   const [secret, setSecret] = useState('');
   const [onetime, setOnetime] = useState(true);
@@ -51,21 +51,21 @@ const Create = () => {
 
   return (
     <div className="text-center">
-      <h1>{t("Encrypt message")}</h1>
+      <h1>{t('Encrypt message')}</h1>
       <Error message={error} onClick={() => setError('')} />
       {uuid ? (
         <Result uuid={uuid} password={password} prefix="s" />
       ) : (
         <Form>
           <FormGroup>
-            <Label>{t("Secret message")}</Label>
+            <Label>{t('Secret message')}</Label>
             <Input
               type="textarea"
               name="secret"
               rows="4"
               autoFocus={true}
-              placeholder={t("Message to encrypt locally in your browser")}
-              onChange={e => setSecret(e.target.value)}
+              placeholder={t('Message to encrypt locally in your browser')}
+              onChange={(e) => setSecret(e.target.value)}
               value={secret}
             />
           </FormGroup>
@@ -79,9 +79,9 @@ const Create = () => {
             onClick={() => submit()}
           >
             {loading ? (
-              <span>{t("Encrypting message...")}</span>
+              <span>{t('Encrypting message...')}</span>
             ) : (
-              <span>{t("Encrypt Message")}</span>
+              <span>{t('Encrypt Message')}</span>
             )}
           </Button>
         </Form>
@@ -105,7 +105,7 @@ export const OneTime = (
         onChange={() => setOnetime(!onetime)}
         checked={onetime}
       />
-      {t("One-time download")}
+      {t('One-time download')}
     </FormGroup>
   );
 };
@@ -122,17 +122,17 @@ export const Lifetime = (
     {
       duration: 3600,
       name: '1h',
-      text: t("One Hour"),
+      text: t('One Hour'),
     },
     {
       duration: 86400,
       name: '1d',
-      text: t("One Day"),
+      text: t('One Day'),
     },
     {
       duration: 604800,
       name: '1w',
-      text: t("One Week"),
+      text: t('One Week'),
     },
   ]) {
     buttons.push(
@@ -142,7 +142,7 @@ export const Lifetime = (
             type="radio"
             name={i.name}
             value={i.duration}
-            onChange={e => setExpiration(+e.target.value)}
+            onChange={(e) => setExpiration(+e.target.value)}
             checked={expiration === i.duration}
           />
           {i.text}
@@ -154,7 +154,7 @@ export const Lifetime = (
   return (
     <FormGroup tag="fieldset">
       <FormText color="muted">
-        {t("The encrypted message will be deleted automatically after")}
+        {t('The encrypted message will be deleted automatically after')}
       </FormText>
       {buttons}
     </FormGroup>
