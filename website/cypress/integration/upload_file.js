@@ -1,58 +1,52 @@
-describe('Upload/Download File', function () {
-  let polyfill;
-
-  before(() => {
-    const polyfillUrl = 'https://unpkg.com/unfetch/dist/unfetch.umd.js';
-
-    cy.request(polyfillUrl).then((response) => {
-      polyfill = response.body;
-    });
-  });
-
+describe('Upload/Download File', () => {
   beforeEach(() => {
-    cy.server();
-    cy.route({
-      method: 'POST',
-      url: '/file',
-      response: { message: '75c3383d-a0d9-4296-8ca8-026cc2272271' },
+    cy.visit('#/upload');
+    cy.intercept('POST', 'http://localhost:3000/file', {
+      body: { message: '75c3383d-a0d9-4296-8ca8-026cc2272271' },
     }).as('post');
-
-    cy.visit('#/upload', {
-      onBeforeLoad(win) {
-        delete win.fetch;
-        win.eval(polyfill);
-        win.fetch = win.unfetch;
-      },
-    });
   });
 
-  it('create secret', () => {
+  const linkSelector = '.MuiTableBody-root > :nth-child(1) > :nth-child(3)';
+  it('upload file', () => {
     const yourFixturePath = 'data.txt';
     cy.get('input').attachFile(yourFixturePath);
-    cy.get('#full-i').should(
-      'contain.value',
+    cy.get(linkSelector).should(
+      'contain',
       'http://localhost:3000/#/f/75c3383d-a0d9-4296-8ca8-026cc2272271',
     );
-    cy.get('@post').should((req) => {
-      console.log(req.request.body.message);
-      cy.route({
-        method: 'GET',
-        url: '/file/75c3383d-a0d9-4296-8ca8-026cc2272271',
-        response: {
-          message: req.request.body.message,
-        },
-      });
-      expect(req.method).to.equal('POST');
-      expect(req.request.body.expiration).to.equal(3600);
-      expect(req.request.body.one_time).to.equal(true);
-    });
-    cy.get('#full-i')
-      .invoke('val')
+    cy.wait('@post').then(mockGetResponse);
+
+    cy.get(linkSelector)
+      .invoke('text')
       .then((text) => {
         cy.visit(text);
-        cy.contains(
-          'Downloading file and decrypting in browser, please hold...',
-        );
+        cy.contains('File downloaded');
+        // File downloads not supported in headless mode.
+        // https://github.com/cypress-io/cypress/issues/949
+        cy.readFile('cypress/downloads/data.txt').then((f) => {
+          expect(f).to.equal('hello world');
+        });
+      });
+  });
+
+  it('upload file with custom password', () => {
+    cy.get('input[name=generateDecryptionKey]').click(); // specify password
+    const password = 'My$3cr3tP4$$w0rd';
+    cy.get('#password').type(password);
+    cy.get('input').attachFile('data.txt');
+    cy.get(linkSelector).should(
+      'contain',
+      'http://localhost:3000/#/f/75c3383d-a0d9-4296-8ca8-026cc2272271',
+    );
+    cy.wait('@post').then(mockGetResponse);
+
+    cy.get(linkSelector)
+      .invoke('text')
+      .then((text) => {
+        cy.visit(text);
+        cy.get('input').type(password);
+        cy.get('button').click();
+        cy.contains('File downloaded');
         // File downloads not supported in headless mode.
         // https://github.com/cypress-io/cypress/issues/949
         cy.readFile('cypress/downloads/data.txt').then((f) => {
@@ -61,3 +55,17 @@ describe('Upload/Download File', function () {
       });
   });
 });
+
+// Take encrypted message from POST request and mock GET request with message.
+const mockGetResponse = (intercept) => {
+  const body = JSON.parse(intercept.request.body);
+  expect(body.expiration).to.equal(3600);
+  expect(body.one_time).to.equal(true);
+  cy.intercept(
+    'GET',
+    'http://localhost:3000/file/75c3383d-a0d9-4296-8ca8-026cc2272271',
+    {
+      body: { message: body.message },
+    },
+  );
+};

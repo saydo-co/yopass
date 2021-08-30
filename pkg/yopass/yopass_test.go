@@ -1,276 +1,334 @@
-package yopass
+package yopass_test
 
 import (
-	"encoding/json"
+	"bytes"
+	"errors"
 	"fmt"
-	"io"
-	"net/http"
-	"net/http/httptest"
+	"io/ioutil"
+	"regexp"
 	"strings"
 	"testing"
 
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/jhaals/yopass/pkg/yopass"
+	"golang.org/x/crypto/openpgp"
+	"golang.org/x/crypto/openpgp/armor"
 )
 
-type mockDB struct{}
-
-func (db *mockDB) Get(key string) (Secret, error) {
-	return Secret{Message: `***ENCRYPTED***`}, nil
-}
-func (db *mockDB) Put(key string, secret Secret) error {
-	return nil
-}
-func (db *mockDB) Delete(key string) error {
-	return nil
-}
-
-type brokenDB struct{}
-
-func (db *brokenDB) Get(key string) (Secret, error) {
-	return Secret{}, fmt.Errorf("Some error")
-}
-func (db *brokenDB) Put(key string, secret Secret) error {
-	return fmt.Errorf("Some error")
-}
-func (db *brokenDB) Delete(key string) error {
-	return fmt.Errorf("Some error")
+func TestSecretJSON(t *testing.T) {
+	got, err := (&yopass.Secret{Expiration: 3600, Message: "msg", OneTime: true}).ToJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []byte(`{"expiration":3600,"message":"msg","one_time":true}`)
+	if bytes.Compare(want, got) != 0 {
+		t.Errorf("expected JSON %q, got %q", want, got)
+	}
 }
 
-type mockBrokenDB2 struct{}
-
-func (db *mockBrokenDB2) Get(key string) (Secret, error) {
-	return Secret{OneTime: true, Message: "encrypted"}, nil
-}
-func (db *mockBrokenDB2) Put(key string, secret Secret) error {
-	return fmt.Errorf("Some error")
-}
-func (db *mockBrokenDB2) Delete(key string) error {
-	return fmt.Errorf("Some error")
-}
-
-func TestCreateSecret(t *testing.T) {
-	tt := []struct {
-		name       string
-		statusCode int
-		body       io.Reader
-		output     string
-		db         Database
-		maxLength  int
+func TestDecrypt(t *testing.T) {
+	tests := []struct {
+		name     string
+		msg      string
+		key      string
+		content  string
+		filename string
+		err      error
 	}{
 		{
-			name:       "validRequest",
-			statusCode: 200,
-			body:       strings.NewReader(`{"message": "hello world", "expiration": 3600}`),
-			output:     "",
-			db:         &mockDB{},
-			maxLength:  100,
+			name: "text",
+			msg: `-----BEGIN PGP MESSAGE-----
+Version: OpenPGP.js v4.10.8
+Comment: https://openpgpjs.org
+
+wy4ECQMIRthQ3aO85NvgAfASIX3dTwsFVt0gshPu7n1tN05e8rpqxOk6PYNm
+xtt90k4BqHuTCLNlFRJjuiuE8zdIc+j5zTN5zihxUReVqokeqULLOx2FBMHZ
+sbfqaG/iDbp+qDOc98IagMyPrEqKDxnhVVOraXy5dD9RDsntLso=
+=0vwU
+-----END PGP MESSAGE-----`,
+			key:     "4VGynYHxNGcurRgVEQ7RHX",
+			content: "example secret message",
 		},
 		{
-			name:       "invalid json",
-			statusCode: 400,
-			body:       strings.NewReader(`{fooo`),
-			output:     "Unable to parse json",
-			db:         &mockDB{},
+			name: "file",
+			msg: `-----BEGIN PGP MESSAGE-----
+Version: OpenPGP.js v4.10.8
+Comment: https://openpgpjs.org
+
+wy4ECQMIHCI4BfNkxELgEICJXDZCq2zf0+DkWHGLBNoM3SzySpFzTF9dGItJ
+wCE50lQBbdoYiYZPT1+O/KCiDpC9P5ixWODZZXjUe/ZGxBvUlUrp0tx1VHWC
+dhgGsvKwXJm0kEwGwqj6mJq/j28FSFoP9Et/LtRuEe3Ct06WOrrHQ4v9DC4=
+=mja3
+-----END PGP MESSAGE-----`,
+			key:      "zQKcZ5jzbxeUI7Ylsu0bej",
+			content:  "example secret file\n",
+			filename: "file-upload.txt",
 		},
 		{
-			name:       "message too long",
-			statusCode: 400,
-			body:       strings.NewReader(`{"expiration": 3600, "message": "wooop"}`),
-			output:     "The encrypted message is too long",
-			db:         &mockDB{},
-			maxLength:  1,
+			name: "cli encrypted",
+			msg: `-----BEGIN PGP MESSAGE-----
+Comment: https://yopass.se
+
+wy4ECQMILuOKAclPM2xgmtofvmWNo5/cfU8W54adSd82wxlrx9dHqfqpvPZnoaWF
+0uAB5FihFdqjbxKcLB3vS5UGETHhL1Hgi+Aj4biL4HPiNPEFqOBC5GYbD5oD7xUW
+Q5FI66ugslngweHlYODQ5IWLpbwMHdiymG7uoIKUusHi1lHUv+Gx0AA=
+=YaUx
+-----END PGP MESSAGE-----`,
+			key:     "gHDiWDzjhgx8Lg7Wnwn90M",
+			content: "cli secret message",
 		},
 		{
-			name:       "invalid expiration",
-			statusCode: 400,
-			body:       strings.NewReader(`{"expiration": 10, "message": "foo"}`),
-			output:     "Invalid expiration specified",
-			db:         &mockDB{},
+			name: "garbage message",
+			msg:  "----- PGP MESSAGE -----",
+			err:  yopass.ErrInvalidMessage,
 		},
 		{
-			name:       "broken database",
-			statusCode: 500,
-			body:       strings.NewReader(`{"expiration": 3600, "message": "foo"}`),
-			output:     "Failed to store secret in database",
-			db:         &brokenDB{},
-			maxLength:  100,
+			name: "wrong decryption key",
+			msg: `-----BEGIN PGP MESSAGE-----
+Version: OpenPGP.js v4.10.8
+Comment: https://openpgpjs.org
+
+wy4ECQMIRthQ3aO85NvgAfASIX3dTwsFVt0gshPu7n1tN05e8rpqxOk6PYNm
+xtt90k4BqHuTCLNlFRJjuiuE8zdIc+j5zTN5zihxUReVqokeqULLOx2FBMHZ
+sbfqaG/iDbp+qDOc98IagMyPrEqKDxnhVVOraXy5dD9RDsntLso=
+=0vwU
+-----END PGP MESSAGE-----`,
+			key: "wrong",
+			err: yopass.ErrInvalidKey,
 		},
 	}
 
-	for _, tc := range tt {
-		t.Run(fmt.Sprintf(tc.name), func(t *testing.T) {
-			req, _ := http.NewRequest("POST", "/secret", tc.body)
-			rr := httptest.NewRecorder()
-			y := New(tc.db, tc.maxLength, prometheus.NewRegistry())
-			y.createSecret(rr, req)
-			var s Secret
-			json.Unmarshal(rr.Body.Bytes(), &s)
-			if tc.output != "" {
-				if s.Message != tc.output {
-					t.Fatalf(`Expected body "%s"; got "%s"`, tc.output, s.Message)
-				}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, name, err := yopass.Decrypt(strings.NewReader(test.msg), test.key)
+			if want := test.err; !errors.Is(err, want) {
+				t.Fatalf("expected error %v, got %v", want, err)
 			}
-			if rr.Code != tc.statusCode {
-				t.Fatalf(`Expected status code %d; got "%d"`, tc.statusCode, rr.Code)
+			if got != test.content {
+				t.Errorf("expected plaintext %q, got %q", test.content, got)
+			}
+			if name != test.filename {
+				t.Errorf("expected filename %q, got %q", test.filename, name)
 			}
 		})
 	}
 }
 
-func TestGetSecret(t *testing.T) {
-	tt := []struct {
-		name       string
-		statusCode int
-		output     string
-		db         Database
-	}{
-		{
-			name:       "Get Secret",
-			statusCode: 200,
-			output:     "***ENCRYPTED***",
-			db:         &mockDB{},
-		},
-		{
-			name:       "Secret not found",
-			statusCode: 404,
-			output:     "Secret not found",
-			db:         &brokenDB{},
-		},
+func TestEncrypt(t *testing.T) {
+	p := "example secret message"
+	k := "4VGynYHxNGcurRgVEQ7RHX"
+
+	c, err := yopass.Encrypt(strings.NewReader(p), k)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
 	}
 
-	for _, tc := range tt {
-		t.Run(fmt.Sprintf(tc.name), func(t *testing.T) {
-			req, err := http.NewRequest("GET", "/secret/foo", nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			rr := httptest.NewRecorder()
-			y := New(tc.db, 1, prometheus.NewRegistry())
-			y.getSecret(rr, req)
-			var s Secret
-			json.Unmarshal(rr.Body.Bytes(), &s)
-			if s.Message != tc.output {
-				t.Fatalf(`Expected body "%s"; got "%s"`, tc.output, s.Message)
-			}
-			if rr.Code != tc.statusCode {
-				t.Fatalf(`Expected status code %d; got "%d"`, tc.statusCode, rr.Code)
-			}
-		})
+	prompt := func(keys []openpgp.Key, symmetric bool) ([]byte, error) {
+		return []byte(k), nil
+	}
+	buf := bytes.NewBuffer([]byte(c))
+	armorBlock, err := armor.Decode(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	md, err := openpgp.ReadMessage(armorBlock.Body, nil, prompt, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ioutil.ReadAll(md.UnverifiedBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != p {
+		t.Fatalf("expected cyphertext to be %q, got %q", p, got)
+	}
+
+	_, err = yopass.Encrypt(strings.NewReader(p), "")
+	if want := yopass.ErrEmptyKey; !errors.Is(err, want) {
+		t.Errorf("expected error %v, got %v", want, err)
 	}
 }
 
-func TestMetrics(t *testing.T) {
-	requests := []struct {
-		method string
-		path   string
-	}{
-		{
-			method: "GET",
-			path:   "/secret/ebfa0c88-7610-4d3f-856a-c8810a44361c",
-		},
-		{
-			method: "GET",
-			path:   "/secret/invalid-key-format",
-		},
-	}
-	y := New(&mockDB{}, 1, prometheus.NewRegistry())
-	h := y.HTTPHandler()
+type invalidFile struct{}
 
-	for _, r := range requests {
-		req, err := http.NewRequest(r.method, r.path, nil)
+func (invalidFile) Read(p []byte) (n int, err error) { return 0, fmt.Errorf("Broken I/O") }
+
+func TestEncryptWithInvalidFile(t *testing.T) {
+	_, err := yopass.Encrypt(invalidFile{}, "somekey")
+	if err == nil {
+		t.Fatal("expected error, got none")
+	}
+	want := "could not copy data: Broken I/O"
+	if err.Error() != want {
+		t.Fatalf("expected %s, got %v", want, err)
+	}
+}
+
+func TestGenerateKey(t *testing.T) {
+	format := regexp.MustCompile("^[a-zA-Z0-9-_]{22}$")
+
+	tests := make(map[string]struct{})
+	for i := 0; i < 10_000; i++ {
+		key, err := yopass.GenerateKey()
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("expected no error, got %v", err)
 		}
-		rr := httptest.NewRecorder()
-		h.ServeHTTP(rr, req)
-	}
-
-	metrics := []string{"yopass_http_requests_total", "yopass_http_request_duration_seconds"}
-	n, err := testutil.GatherAndCount(y.registry, metrics...)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if expected := len(metrics) * len(requests); n != expected {
-		t.Fatalf(`Expected %d recorded metrics; got %d`, expected, n)
-	}
-
-	// Note: A secret with an invalid key won't be served by the getSecret handler
-	// at this point as it doens't match the path template.
-	output := `
-# HELP yopass_http_requests_total Total number of requests served by HTTP method, path and response code.
-# TYPE yopass_http_requests_total counter
-yopass_http_requests_total{code="200",method="GET",path="/secret/:key"} 1
-yopass_http_requests_total{code="404",method="GET",path="/"} 1
-`
-	err = testutil.GatherAndCompare(y.registry, strings.NewReader(output), "yopass_http_requests_total")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	warnings, err := testutil.GatherAndLint(y.registry)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(warnings) != 0 {
-		t.Fatalf(`Expected no metric linter warnings; got %d`, len(warnings))
+		if !format.MatchString(key) {
+			t.Errorf("expected key format %q, got key %q", format.String(), key)
+		}
+		if _, ok := tests[key]; ok {
+			t.Errorf("expected key to be random, got key %q more than once", key)
+		}
+		tests[key] = struct{}{}
 	}
 }
 
-func TestSecurityHeaders(t *testing.T) {
-	tt := []struct {
-		scheme       string
-		headers      map[string]string
-		unsetHeaders []string
+func TestSecretURL(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		id   string
+		key  string
+		fOpt bool
+		kOpt bool
+		want string
 	}{
 		{
-			scheme: "http",
-			headers: map[string]string{
-				"content-security-policy": "default-src 'self'; font-src https://fonts.gstatic.com; form-action 'self'; frame-ancestors 'none'; script-src 'self' 'unsafe-inline' https://storage.googleapis.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
-				"referrer-policy":         "no-referrer",
-				"x-content-type-options":  "nosniff",
-				"x-frame-options":         "DENY",
-				"x-xss-protection":        "1; mode=block",
-			},
-			unsetHeaders: []string{"strict-transport-security"},
+			name: "regular",
+			url:  "https://yopass.se",
+			id:   "b961103f-5a54-4aae-94b8-dccb903802bc",
+			key:  "X9eSZdgUOXSJ3ft0TXAfWT",
+			want: "https://yopass.se/#/s/b961103f-5a54-4aae-94b8-dccb903802bc/X9eSZdgUOXSJ3ft0TXAfWT",
 		},
 		{
-			scheme: "https",
-			headers: map[string]string{
-				"content-security-policy":   "default-src 'self'; font-src https://fonts.gstatic.com; form-action 'self'; frame-ancestors 'none'; script-src 'self' 'unsafe-inline' https://storage.googleapis.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
-				"referrer-policy":           "no-referrer",
-				"strict-transport-security": "max-age=31536000",
-				"x-content-type-options":    "nosniff",
-				"x-frame-options":           "DENY",
-				"x-xss-protection":          "1; mode=block",
-			},
+			name: "trailing slash",
+			url:  "https://yopass.se/",
+			id:   "b961103f-5a54-4aae-94b8-dccb903802bc",
+			key:  "X9eSZdgUOXSJ3ft0TXAfWT",
+			want: "https://yopass.se/#/s/b961103f-5a54-4aae-94b8-dccb903802bc/X9eSZdgUOXSJ3ft0TXAfWT",
+		},
+		{
+			name: "different URL",
+			url:  "https://yopass.company.org",
+			id:   "b961103f-5a54-4aae-94b8-dccb903802bc",
+			key:  "X9eSZdgUOXSJ3ft0TXAfWT",
+			want: "https://yopass.company.org/#/s/b961103f-5a54-4aae-94b8-dccb903802bc/X9eSZdgUOXSJ3ft0TXAfWT",
+		},
+		{
+			name: "manual key",
+			url:  "https://yopass.se",
+			id:   "6cb3b277-dadd-47c5-b118-d49824b40e15",
+			key:  "manual-key",
+			kOpt: true,
+			want: "https://yopass.se/#/s/6cb3b277-dadd-47c5-b118-d49824b40e15",
+		},
+		{
+			name: "file upload",
+			url:  "https://yopass.se",
+			id:   "c680736d-32ff-4e1a-a18f-3a20e6774616",
+			key:  "ZMprbkA78FkEWAbrXKK06y",
+			fOpt: true,
+			want: "https://yopass.se/#/f/c680736d-32ff-4e1a-a18f-3a20e6774616/ZMprbkA78FkEWAbrXKK06y",
+		},
+		{
+			name: "file upload with manual key",
+			url:  "https://yopass.se",
+			id:   "7a43c54c-6dad-4f98-b422-589021d1ac87",
+			key:  "manual-key",
+			fOpt: true,
+			kOpt: true,
+			want: "https://yopass.se/#/f/7a43c54c-6dad-4f98-b422-589021d1ac87",
 		},
 	}
 
-	y := New(&mockDB{}, 1, prometheus.NewRegistry())
-	h := y.HTTPHandler()
-
-	t.Parallel()
-	for _, test := range tt {
-		t.Run("scheme="+test.scheme, func(t *testing.T) {
-			req, err := http.NewRequest("GET", "/", nil)
-			if err != nil {
-				t.Fatal(err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			have := yopass.SecretURL(tt.url, tt.id, tt.key, tt.fOpt, tt.kOpt)
+			if tt.want != have {
+				t.Errorf("expected %q, got %q", tt.want, have)
 			}
-			req.Header.Set("X-Forwarded-Proto", test.scheme)
-			rr := httptest.NewRecorder()
-			h.ServeHTTP(rr, req)
+		})
+	}
+}
 
-			for header, value := range test.headers {
-				if got := rr.Header().Get(header); got != value {
-					t.Errorf("Expected HTTP header %s to be %q, got %q", header, value, got)
-				}
+func TestParseURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		url     string
+		id      string
+		key     string
+		fileOpt bool
+		keyOpt  bool
+		fail    bool
+	}{
+		{
+			name: "regular",
+			url:  "https://yopass.se/#/s/45d405ef-5c52-46c1-86d2-2d270c5b1b19/sLYp6skAIhkUnfUMimVU5O",
+			id:   "45d405ef-5c52-46c1-86d2-2d270c5b1b19",
+			key:  "sLYp6skAIhkUnfUMimVU5O",
+		},
+		{
+			name: "trailing newline",
+			url:  "https://yopass.se/#/s/45d405ef-5c52-46c1-86d2-2d270c5b1b19/sLYp6skAIhkUnfUMimVU5O\n",
+			id:   "45d405ef-5c52-46c1-86d2-2d270c5b1b19",
+			key:  "sLYp6skAIhkUnfUMimVU5O",
+		},
+		{
+			name:   "manual key",
+			url:    "https://yopass.se/#/c/2c625fd2-84b5-4a02-a6bf-23a2939eea4f",
+			id:     "2c625fd2-84b5-4a02-a6bf-23a2939eea4f",
+			keyOpt: true,
+		},
+		{
+			name:    "file upload",
+			url:     "https://yopass.se/#/f/c680736d-32ff-4e1a-a18f-3a20e6774616/ZMprbkA78FkEWAbrXKK06y",
+			id:      "c680736d-32ff-4e1a-a18f-3a20e6774616",
+			key:     "ZMprbkA78FkEWAbrXKK06y",
+			fileOpt: true,
+		},
+		{
+			name:    "file upload with manual key",
+			url:     "https://yopass.se/#/d/7a43c54c-6dad-4f98-b422-589021d1ac87",
+			id:      "7a43c54c-6dad-4f98-b422-589021d1ac87",
+			fileOpt: true,
+			keyOpt:  true,
+		},
+		{
+			name: "invalid URL",
+			url:  "invalid://yopass:se/#/d/7a43c54c-6dad-4f98-b422-589021d1ac87",
+			fail: true,
+		},
+		{
+			name: "missing fragment",
+			url:  "https://yopass.se/",
+			fail: true,
+		},
+		{
+			name: "invalid yopass type",
+			url:  "https://yopass.se/#/z/7a43c54c-6dad-4f98-b422-589021d1ac87",
+			fail: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			id, key, fileOpt, keyOpt, err := yopass.ParseURL(tt.url)
+			if tt.fail && err == nil {
+				t.Fatalf("expected error, got nothing")
 			}
-
-			for _, header := range test.unsetHeaders {
-				if got := rr.Header().Get(header); got != "" {
-					t.Errorf("Expected HTTP header %s to not be set, got %q", header, got)
-				}
+			if !tt.fail && err != nil {
+				t.Fatalf("expected no error, got %v", err)
+			}
+			if tt.id != id {
+				t.Errorf("expected secret id %q, got %q", tt.id, id)
+			}
+			if tt.key != key {
+				t.Errorf("expected secret key %q, got %q", tt.key, key)
+			}
+			if tt.fileOpt != fileOpt {
+				t.Errorf("expected secret file option %t, got %t", tt.fileOpt, fileOpt)
+			}
+			if tt.keyOpt != keyOpt {
+				t.Errorf("expected secret key option %t, got %t", tt.keyOpt, keyOpt)
 			}
 		})
 	}
