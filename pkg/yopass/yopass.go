@@ -1,196 +1,179 @@
 package yopass
 
 import (
+	"bytes"
+	"crypto"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
-	"net/http"
+	"errors"
+	"fmt"
+	"io"
+	"io/ioutil"
+	"net/url"
 	"os"
-	"strconv"
 	"strings"
-	"time"
 
-	"github.com/gorilla/handlers"
-	"github.com/gorilla/mux"
-	"github.com/prometheus/client_golang/prometheus"
-	uuid "github.com/satori/go.uuid"
+	"golang.org/x/crypto/openpgp"
+	"golang.org/x/crypto/openpgp/armor"
+	"golang.org/x/crypto/openpgp/packet"
 )
 
-// Yopass struct holding database and settings.
-// This should be created with yopass.New
-type Yopass struct {
-	db        Database
-	maxLength int
-	registry  *prometheus.Registry
+// ErrEmptyKey is returned when no encryption key is provided.
+var ErrEmptyKey = errors.New("empty encryption key")
+
+// ErrInvalidKey is returned when a given decryption key is invalid.
+var ErrInvalidKey = errors.New("invalid decryption key")
+
+// ErrInvalidMessage is returned when a given message is invalid.
+var ErrInvalidMessage = errors.New("invalid message")
+
+var pgpConfig = &packet.Config{
+	DefaultHash:            crypto.SHA256,
+	DefaultCipher:          packet.CipherAES256,
+	DefaultCompressionAlgo: packet.CompressionNone,
 }
 
-// New is the main way of creating the server.
-func New(db Database, maxLength int, r *prometheus.Registry) Yopass {
-	return Yopass{
-		db:        db,
-		maxLength: maxLength,
-		registry:  r,
-	}
+var pgpHeader = map[string]string{
+	"Comment": "https://yopass.se",
 }
 
-// createSecret creates secret
-func (y *Yopass) createSecret(w http.ResponseWriter, request *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+// Secret holds the encrypted message
+type Secret struct {
+	Expiration int32  `json:"expiration,omitempty"`
+	Message    string `json:"message"`
+	OneTime    bool   `json:"one_time,omitempty"`
+}
 
-	decoder := json.NewDecoder(request.Body)
-	var s Secret
-	if err := decoder.Decode(&s); err != nil {
-		http.Error(w, `{"message": "Unable to parse json"}`, http.StatusBadRequest)
-		return
+// ToJSON converts a Secret to json
+func (s *Secret) ToJSON() ([]byte, error) {
+	return json.Marshal(&s)
+}
+
+// Decrypt reads the provided ciphertext and returns the plaintext decrypted
+// with the given key. The ciphertext format is specified by the yopass
+// frontend, no assumptions about the format should be made.
+func Decrypt(r io.Reader, key string) (content, filename string, err error) {
+	tried := false
+	prompt := func([]openpgp.Key, bool) ([]byte, error) {
+		if tried {
+			return nil, ErrInvalidKey
+		}
+		tried = true
+		return []byte(key), nil
 	}
-
-	if !validExpiration(s.Expiration) {
-		http.Error(w, `{"message": "Invalid expiration specified"}`, http.StatusBadRequest)
-		return
-	}
-
-	if len(s.Message) > y.maxLength {
-		http.Error(w, `{"message": "The encrypted message is too long"}`, http.StatusBadRequest)
-		return
-	}
-
-	// Generate new UUID
-	uuidVal, err := uuid.NewV4()
+	a, err := armor.Decode(r)
 	if err != nil {
-		http.Error(w, `{"message": "Unable to generate UUID"}`, http.StatusInternalServerError)
-		return
+		return "", "", ErrInvalidMessage
 	}
-	key := uuidVal.String()
-
-	// store secret in memcache with specified expiration.
-	if err := y.db.Put(key, s); err != nil {
-		http.Error(w, `{"message": "Failed to store secret in database"}`, http.StatusInternalServerError)
-		return
-	}
-
-	resp := map[string]string{"message": key}
-	jsonData, _ := json.Marshal(resp)
-	w.Write(jsonData)
-}
-
-// getSecret from database
-func (y *Yopass) getSecret(w http.ResponseWriter, request *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-
-	secret, err := y.db.Get(mux.Vars(request)["key"])
+	m, err := openpgp.ReadMessage(a.Body, nil, prompt, pgpConfig)
 	if err != nil {
-		http.Error(w, `{"message": "Secret not found"}`, http.StatusNotFound)
-		return
+		return "", "", fmt.Errorf("could not decrypt: %w", err)
 	}
-
-	data, err := secret.ToJSON()
+	p, err := ioutil.ReadAll(m.UnverifiedBody)
 	if err != nil {
-		http.Error(w, `{"message": "Failed to encode secret"}`, http.StatusInternalServerError)
-		return
+		return "", "", fmt.Errorf("could not read plaintext: %w", err)
 	}
-	w.Write(data)
+	// openpgpjs appears to always set a filename. The IsBinary flag is used as
+	// file upload indicator.
+	if m.LiteralData.IsBinary {
+		filename = m.LiteralData.FileName
+	}
+	return string(p), filename, nil
 }
 
-// HTTPHandler containing all routes
-func (y *Yopass) HTTPHandler() http.Handler {
-	mx := mux.NewRouter()
-	mx.Use(newMetricsMiddleware(y.registry))
-	mx.HandleFunc("/secret/"+keyParameter, y.getSecret)
-	mx.HandleFunc("/secret", y.createSecret).Methods("POST")
-	mx.HandleFunc("/file", y.createSecret).Methods("POST")
-	mx.HandleFunc("/file/"+keyParameter, y.getSecret)
-	mx.PathPrefix("/").Handler(http.FileServer(http.Dir("public")))
-	return handlers.LoggingHandler(os.Stdout, SecurityHeadersHandler(mx))
-}
+// Encrypt reads the provided plaintext and returns a ciphertext encrypted with
+// the given key. No assumptions about the ciphertext format should be made, the
+// encryption method might change in future versions.
+func Encrypt(r io.Reader, key string) (string, error) {
+	if key == "" {
+		return "", ErrEmptyKey
+	}
 
-const keyParameter = "{key:(?:[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})}"
-
-// validExpiration validates that expiration is either
-// 3600(1hour), 86400(1day) or 604800(1week)
-func validExpiration(expiration int32) bool {
-	for _, ttl := range []int32{3600, 86400, 604800} {
-		if ttl == expiration {
-			return true
+	var hints *openpgp.FileHints
+	if f, ok := r.(*os.File); ok && r != os.Stdin {
+		stat, err := f.Stat()
+		if err != nil {
+			return "", fmt.Errorf("could not get file info: %w", err)
+		}
+		hints = &openpgp.FileHints{
+			IsBinary: true,
+			FileName: stat.Name(),
+			ModTime:  stat.ModTime(),
 		}
 	}
-	return false
+
+	buf := new(bytes.Buffer)
+	a, err := armor.Encode(buf, "PGP MESSAGE", pgpHeader)
+	if err != nil {
+		return "", fmt.Errorf("could not create armor encoder: %w", err)
+	}
+	w, err := openpgp.SymmetricallyEncrypt(a, []byte(key), hints, pgpConfig)
+	if err != nil {
+		return "", fmt.Errorf("could not encrypt: %w", err)
+	}
+	if _, err := io.Copy(w, r); err != nil {
+		return "", fmt.Errorf("could not copy data: %w", err)
+	}
+	w.Close()
+	a.Close()
+
+	return buf.String(), nil
 }
 
-// SecurityHeadersHandler returns a middleware which sets common security
-// HTTP headers on the response to mitigate common web vulnerabilities.
-func SecurityHeadersHandler(next http.Handler) http.Handler {
-	csp := []string{
-		"default-src 'self'",
-		"font-src https://fonts.gstatic.com",
-		"form-action 'self'",
-		"frame-ancestors 'none'",
-		"script-src 'self' 'unsafe-inline' https://storage.googleapis.com",
-		"style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+// GenerateKey creates a new encryption key from a cryptographically secure
+// random number generator. The format matches the Javascript implementation.
+func GenerateKey() (string, error) {
+	const length = 22
+
+	b := make([]byte, length)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.URLEncoding.EncodeToString(b)[:length], nil
+}
+
+// SecretURL returns a URL which decryts the specified secret in the browser.
+func SecretURL(url, id, key string, fileOpt, manualKeyOpt bool) string {
+	prefix := "s"
+	if fileOpt {
+		prefix = "f"
+	}
+	path := id
+	if !manualKeyOpt {
+		path += "/" + key
+	}
+	return fmt.Sprintf("%s/#/%s/%s", strings.TrimSuffix(url, "/"), prefix, path)
+}
+
+// ParseURL returns secret ID and key from a regular yopass URL.
+func ParseURL(s string) (id, key string, fileOpt, keyOpt bool, err error) {
+	u, err := url.Parse(strings.TrimSpace(s))
+	if err != nil {
+		return "", "", false, false, fmt.Errorf("invalid URL: %w", err)
 	}
 
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("content-security-policy", strings.Join(csp, "; "))
-		w.Header().Set("referrer-policy", "no-referrer")
-		w.Header().Set("x-content-type-options", "nosniff")
-		w.Header().Set("x-frame-options", "DENY")
-		w.Header().Set("x-xss-protection", "1; mode=block")
-		if r.URL.Scheme == "https" || r.Header.Get("X-Forwarded-Proto") == "https" {
-			w.Header().Set("strict-transport-security", "max-age=31536000")
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-// newMetricsHandler creates a middleware handler recording all HTTP requests in
-// the given Prometheus registry
-func newMetricsMiddleware(reg prometheus.Registerer) func(http.Handler) http.Handler {
-	requests := prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "yopass_http_requests_total",
-			Help: "Total number of requests served by HTTP method, path and response code.",
-		},
-		[]string{"method", "path", "code"},
-	)
-	reg.MustRegister(requests)
-
-	duration := prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:    "yopass_http_request_duration_seconds",
-			Help:    "Histogram of HTTP request latencies by method and path.",
-			Buckets: prometheus.DefBuckets,
-		},
-		[]string{"method", "path"},
-	)
-	reg.MustRegister(duration)
-
-	return func(handler http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			start := time.Now()
-			rec := statusCodeRecorder{ResponseWriter: w, statusCode: http.StatusOK}
-			handler.ServeHTTP(&rec, r)
-			path := normalizedPath(r)
-			requests.WithLabelValues(r.Method, path, strconv.Itoa(rec.statusCode)).Inc()
-			duration.WithLabelValues(r.Method, path).Observe(time.Since(start).Seconds())
-		})
+	f := strings.Split(u.Fragment, "/")
+	if len(f) < 3 || len(f) > 4 || f[0] != "" {
+		return "", "", false, false, fmt.Errorf("unexpected URL: %q", s)
 	}
-}
 
-// normlizedPath returns a normalized mux path template representation
-func normalizedPath(r *http.Request) string {
-	if route := mux.CurrentRoute(r); route != nil {
-		if tmpl, err := route.GetPathTemplate(); err == nil {
-			return strings.ReplaceAll(tmpl, keyParameter, ":key")
-		}
+	switch f[1] {
+	case "s":
+	case "c":
+		keyOpt = true
+	case "f":
+		fileOpt = true
+	case "d":
+		fileOpt = true
+		keyOpt = true
+	default:
+		return "", "", false, false, fmt.Errorf("unexpected URL: %q", s)
 	}
-	return "<other>"
-}
 
-// statusCodeRecorder is a HTTP ResponseWriter recording the response code
-type statusCodeRecorder struct {
-	http.ResponseWriter
-	statusCode int
-}
-
-// WriteHeader implements http.ResponseWriter
-func (rw *statusCodeRecorder) WriteHeader(code int) {
-	rw.ResponseWriter.WriteHeader(code)
-	rw.statusCode = code
+	id = f[2]
+	if len(f) == 4 {
+		key = f[3]
+	}
+	return id, key, fileOpt, keyOpt, nil
 }
