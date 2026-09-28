@@ -1457,10 +1457,10 @@ node-releases@^2.0.54:
   resolved "https://registry.yarnpkg.com/node-releases/-/node-releases-2.0.54.tgz#09af17d5647aa9f221ec5cf2becb95b68a981afe"
   integrity sha512-YHs7BmmcsdAI5Ozuf8JZo6PT0mv2GIWC9vMfvUC3dp65M8hn7Ux8CPL+2oBI7juNuj9d0ndhTcznq2ODBps9cQ==
 
-openpgp@^6.3.1:
-  version "6.3.1"
-  resolved "https://registry.yarnpkg.com/openpgp/-/openpgp-6.3.1.tgz#2e9c60b2173f799e99c7e6936324fe6379b20cf3"
-  integrity sha512-7oSPvmlKPojxFoyelT5DWPIAVmqWZh4qU/5pO6bdoShEtRpCw9Sye9IXUQj6EFM3XpgGssqccAr705YtTcLNQw==
+openpgp@^6.3.2:
+  version "6.3.2"
+  resolved "https://registry.yarnpkg.com/openpgp/-/openpgp-6.3.2.tgz#b279c6b8380e605c3cd53766062ea14d1f254787"
+  integrity sha512-wcZTzHz41LV8Y48zH/JlD1JT8YdNmpWOuMAjQ/podvvCwsjBEU37K3znJh4UQcj3hksE5z9TzvhbUbwzsGvlLQ==
 
 optionator@^0.9.3:
   version "0.9.4"
